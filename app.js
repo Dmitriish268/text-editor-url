@@ -67,7 +67,26 @@ class TextEditor {
         
         if (roomId) {
             this.roomId = roomId;
-            this.isHost = false;
+            // Проверить, является ли это хостом (если в localStorage есть запись с isHost=true)
+            try {
+                const storageKey = `text-editor-${roomId}`;
+                const saved = localStorage.getItem(storageKey);
+                if (saved) {
+                    const data = JSON.parse(saved);
+                    // Если в localStorage указано что это хост, остаться хостом
+                    if (data.isHost === true) {
+                        this.isHost = true;
+                    } else {
+                        this.isHost = false;
+                    }
+                } else {
+                    // Если нет записи в localStorage, значит это новый клиент
+                    this.isHost = false;
+                }
+            } catch (e) {
+                // В случае ошибки считаем клиентом
+                this.isHost = false;
+            }
         }
     }
     
@@ -168,7 +187,8 @@ class TextEditor {
             const data = {
                 text: this.editor.value,
                 timestamp: Date.now(),
-                isHost: this.isHost
+                isHost: this.isHost,
+                roomId: this.roomId
             };
             localStorage.setItem(storageKey, JSON.stringify(data));
         } catch (e) {
@@ -280,7 +300,9 @@ class TextEditor {
                 this.peer.on('open', (id) => {
                     console.log('Peer ID (roomId):', id);
                     this.roomId = id; // Использовать реальный ID от сервера
+                    this.isHost = true; // Подтвердить статус хоста
                     this.updateURL(); // Обновить URL только с roomId
+                    this.saveToStorage(); // Сохранить статус хоста
                     this.updateSyncStatus('syncing', 'Ожидание подключений...');
                     
                     // Слушать входящие подключения
