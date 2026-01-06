@@ -11,25 +11,32 @@ class TextEditor {
         this.syncText = document.getElementById('syncText');
         
         this.debounceTimer = null;
+        this.syncTimer = null;
         this.peer = null;
         this.connections = [];
         this.isHost = false;
         this.roomId = null;
         this.isUpdatingFromSync = false;
+        this.lastSyncedText = '';
+        this.debugMode = true; // Включить отладку
         
         this.init();
     }
     
+    debug(...args) {
+        if (this.debugMode) {
+            console.log(`[DEBUG ${this.isHost ? 'HOST' : 'CLIENT'}]`, ...args);
+        }
+    }
+    
     init() {
+        this.debug('Инициализация редактора');
+        
         // Проверить наличие roomId в URL
         this.loadRoomFromURL();
         
-        // Если это клиент (есть roomId в URL), загрузить из localStorage только для быстрого отображения
-        // Актуальный текст будет запрошен у хоста через WebRTC
-        if (this.roomId && !this.isHost) {
-            this.loadFromStorage();
-        } else if (this.isHost) {
-            // Если это хост, загрузить из localStorage
+        // Загрузить текст из localStorage (для быстрого отображения)
+        if (this.roomId) {
             this.loadFromStorage();
         }
         
@@ -58,6 +65,9 @@ class TextEditor {
         
         // Обновить счетчики
         this.updateCounters();
+        
+        // Запустить периодическую синхронизацию
+        this.startPeriodicSync();
     }
     
     // Загрузить roomId из URL
@@ -67,26 +77,26 @@ class TextEditor {
         
         if (roomId) {
             this.roomId = roomId;
-            // Проверить, является ли это хостом (если в localStorage есть запись с isHost=true)
+            this.debug('Загружен roomId из URL:', roomId);
+            
+            // Проверить статус хоста из localStorage
             try {
                 const storageKey = `text-editor-${roomId}`;
                 const saved = localStorage.getItem(storageKey);
                 if (saved) {
                     const data = JSON.parse(saved);
-                    // Если в localStorage указано что это хост, остаться хостом
-                    if (data.isHost === true) {
-                        this.isHost = true;
-                    } else {
-                        this.isHost = false;
-                    }
+                    this.isHost = data.isHost === true;
+                    this.debug('Статус из localStorage:', this.isHost ? 'HOST' : 'CLIENT');
                 } else {
-                    // Если нет записи в localStorage, значит это новый клиент
                     this.isHost = false;
+                    this.debug('Нет записи в localStorage, статус: CLIENT');
                 }
             } catch (e) {
-                // В случае ошибки считаем клиентом
                 this.isHost = false;
+                this.debug('Ошибка чтения localStorage, статус: CLIENT');
             }
+        } else {
+            this.debug('Нет roomId в URL, будет создан новый');
         }
     }
     
@@ -95,14 +105,12 @@ class TextEditor {
         if (!this.roomId) return;
         
         const url = new URL(window.location.href);
-        // Удалить все параметры
         url.search = '';
-        // Добавить только roomId
         url.searchParams.set('room', this.roomId);
         
-        // Обновить URL без перезагрузки страницы (только один раз при создании комнаты)
         if (window.location.search !== url.search) {
             window.history.replaceState({}, '', url);
+            this.debug('URL обновлен:', url.href);
         }
     }
     
@@ -116,12 +124,12 @@ class TextEditor {
         // Сохранить в localStorage
         this.saveToStorage();
         
-        // Синхронизировать только через WebRTC (не через URL)
+        // Синхронизировать через WebRTC
         clearTimeout(this.debounceTimer);
         this.debounceTimer = setTimeout(() => {
-            // Синхронизировать только если изменение не пришло от синхронизации
-            if (!this.isUpdatingFromSync) {
+            if (!this.isUpdatingFromSync && text !== this.lastSyncedText) {
                 this.syncTextToPeers(text);
+                this.lastSyncedText = text;
             }
         }, 300);
     }
@@ -144,7 +152,6 @@ class TextEditor {
             await navigator.clipboard.writeText(url);
             this.showStatus('✅ Ссылка скопирована!');
         } catch (e) {
-            // Fallback для старых браузеров
             const textArea = document.createElement('textarea');
             textArea.value = url;
             document.body.appendChild(textArea);
@@ -175,6 +182,7 @@ class TextEditor {
             this.updateCounters();
             this.saveToStorage();
             this.syncTextToPeers('');
+            this.lastSyncedText = '';
         }
     }
     
@@ -191,12 +199,13 @@ class TextEditor {
                 roomId: this.roomId
             };
             localStorage.setItem(storageKey, JSON.stringify(data));
+            this.debug('Сохранено в localStorage:', this.editor.value.length, 'символов');
         } catch (e) {
             console.error('Ошибка сохранения в localStorage:', e);
         }
     }
     
-    // Загрузить текст из localStorage (только для быстрого отображения)
+    // Загрузить текст из localStorage
     loadFromStorage() {
         if (!this.roomId) return;
         
@@ -206,10 +215,12 @@ class TextEditor {
             if (saved) {
                 const data = JSON.parse(saved);
                 if (data.text !== undefined && data.text !== null) {
-                    // Загрузить только если редактор пустой (не перезаписывать если уже есть текст)
+                    // Загрузить только если редактор пустой
                     if (!this.editor.value || this.editor.value.trim() === '') {
                         this.editor.value = data.text;
+                        this.lastSyncedText = data.text;
                         this.updateCounters();
+                        this.debug('Загружено из localStorage:', data.text.length, 'символов');
                     }
                 }
             }
@@ -221,7 +232,6 @@ class TextEditor {
     // Инициализация синхронизации через WebRTC
     async initSync() {
         try {
-            // Использовать только PeerJS для синхронизации между устройствами
             if (typeof Peer !== 'undefined') {
                 await this.initPeerJS();
             } else {
@@ -245,12 +255,12 @@ class TextEditor {
             const params = new URLSearchParams(window.location.search);
             const roomParam = params.get('room');
             
-            if (roomParam) {
-                // Клиент: подключаемся к существующей комнате
+            if (roomParam && !this.isHost) {
+                // КЛИЕНТ: подключаемся к существующей комнате
                 this.roomId = roomParam;
                 this.isHost = false;
+                this.debug('Инициализация как КЛИЕНТ, roomId:', roomParam);
                 
-                // Создать Peer без ID (случайный ID)
                 this.peer = new Peer({
                     host: 'peerjs-server.herokuapp.com',
                     port: 443,
@@ -264,26 +274,39 @@ class TextEditor {
                     }
                 });
                 
-                this.peer.on('open', () => {
+                this.peer.on('open', (id) => {
+                    this.debug('Peer открыт (клиент), ID:', id);
                     this.updateSyncStatus('syncing', 'Подключение к хосту...');
-                    const conn = this.peer.connect(this.roomId);
+                    
+                    // Подключиться к хосту
+                    const conn = this.peer.connect(this.roomId, {
+                        reliable: true
+                    });
                     this.setupConnection(conn);
                     
-                    // Если соединение не установилось за 3 секунды, попробовать еще раз
+                    // Повторная попытка через 3 секунды если не подключились
                     setTimeout(() => {
                         if (this.connections.length === 0) {
+                            this.debug('Повторное подключение...');
                             this.updateSyncStatus('syncing', 'Повторное подключение...');
-                            const retryConn = this.peer.connect(this.roomId);
+                            const retryConn = this.peer.connect(this.roomId, {
+                                reliable: true
+                            });
                             this.setupConnection(retryConn);
                         }
                     }, 3000);
                 });
+                
             } else {
-                // Хост: создаем новую комнату
+                // ХОСТ: создаем новую комнату
                 this.isHost = true;
                 
-                // Создать Peer с указанным ID (это будет roomId)
-                this.roomId = this.generateRoomId();
+                if (!this.roomId) {
+                    this.roomId = this.generateRoomId();
+                }
+                
+                this.debug('Инициализация как ХОСТ, roomId:', this.roomId);
+                
                 this.peer = new Peer(this.roomId, {
                     host: 'peerjs-server.herokuapp.com',
                     port: 443,
@@ -298,29 +321,32 @@ class TextEditor {
                 });
                 
                 this.peer.on('open', (id) => {
-                    console.log('Peer ID (roomId):', id);
+                    this.debug('Peer открыт (хост), ID:', id);
                     this.roomId = id; // Использовать реальный ID от сервера
-                    this.isHost = true; // Подтвердить статус хоста
-                    this.updateURL(); // Обновить URL только с roomId
-                    this.saveToStorage(); // Сохранить статус хоста
+                    this.isHost = true;
+                    this.updateURL();
+                    this.saveToStorage();
                     this.updateSyncStatus('syncing', 'Ожидание подключений...');
                     
                     // Слушать входящие подключения
                     this.peer.on('connection', (conn) => {
+                        this.debug('Новое входящее подключение');
                         this.setupConnection(conn);
-                        // Хост автоматически отправит текст через setupConnection
                     });
                 });
             }
             
             this.peer.on('error', (err) => {
-                console.error('PeerJS ошибка:', err);
-                // Если ошибка "ID занят", значит мы клиент и хост уже существует
+                this.debug('PeerJS ошибка:', err.type, err.message);
+                
                 if (err.type === 'peer-unavailable' || err.type === 'unavailable-id') {
-                    // Попробовать подключиться как клиент
-                    if (this.isHost) {
+                    // ID занят - попробовать подключиться как клиент
+                    if (this.isHost && this.roomId) {
+                        this.debug('ID занят, переключение на клиент');
                         this.isHost = false;
-                        const conn = this.peer.connect(this.roomId);
+                        const conn = this.peer.connect(this.roomId, {
+                            reliable: true
+                        });
                         this.setupConnection(conn);
                     }
                 } else {
@@ -336,58 +362,73 @@ class TextEditor {
     
     // Настройка соединения для обмена данными
     setupConnection(conn) {
+        this.debug('Настройка соединения, isHost:', this.isHost);
+        
         conn.on('open', () => {
-            console.log('Соединение установлено');
+            this.debug('Соединение открыто');
             this.connections.push(conn);
             this.updateSyncStatus('synced', 'Синхронизировано');
             
-            // Если мы клиент, ОБЯЗАТЕЛЬНО запросить актуальный текст у хоста
             if (!this.isHost) {
-                // Запросить актуальный текст у хоста (не полагаться на localStorage)
+                // КЛИЕНТ: запросить текст у хоста
+                this.debug('Клиент запрашивает текст у хоста');
                 setTimeout(() => {
                     conn.send({ type: 'request-text' });
                     this.updateSyncStatus('syncing', 'Загрузка текста...');
-                }, 100);
+                }, 200);
             } else {
-                // Если мы хост, отправить актуальный текст сразу всем подключенным клиентам
+                // ХОСТ: отправить текст клиенту
+                this.debug('Хост отправляет текст клиенту');
                 setTimeout(() => {
                     const currentText = this.editor.value || this.getStoredText();
-                    if (currentText) {
+                    if (currentText !== undefined) {
                         this.sendTextUpdate(currentText);
+                        this.debug('Текст отправлен клиенту:', currentText.length, 'символов');
                     }
-                }, 200);
+                }, 300);
             }
         });
         
         conn.on('data', (data) => {
+            this.debug('Получены данные:', data.type);
+            
             if (data.type === 'text-update') {
                 this.isUpdatingFromSync = true;
-                // Всегда обновлять текст, даже если он совпадает (на случай обновления страницы)
                 const receivedText = data.text || '';
+                this.debug('Получен текст:', receivedText.length, 'символов');
+                
                 if (receivedText !== this.editor.value) {
                     this.editor.value = receivedText;
+                    this.lastSyncedText = receivedText;
                     this.updateCounters();
+                    this.debug('Текст обновлен в редакторе');
                 }
-                // Сохранить полученный текст в localStorage (глобальная синхронизация)
+                
                 this.saveToStorage();
                 this.updateSyncStatus('synced', 'Синхронизировано');
+                
                 setTimeout(() => {
                     this.isUpdatingFromSync = false;
                 }, 100);
+                
             } else if (data.type === 'request-text') {
-                // Хост отправляет актуальный текст по запросу клиента
+                // Хост отправляет текст по запросу
+                this.debug('Получен запрос текста от клиента');
                 const currentText = this.editor.value || this.getStoredText();
-                if (currentText) {
+                if (currentText !== undefined) {
                     this.sendTextUpdate(currentText);
+                    this.debug('Текст отправлен по запросу:', currentText.length, 'символов');
                 }
             }
         });
         
         conn.on('close', () => {
+            this.debug('Соединение закрыто');
             this.connections = this.connections.filter(c => c !== conn);
+            
             if (this.connections.length === 0) {
                 this.updateSyncStatus('syncing', 'Переподключение...');
-                // При потере соединения попробовать переподключиться
+                
                 if (!this.isHost && this.roomId) {
                     setTimeout(() => {
                         this.reconnect();
@@ -397,6 +438,7 @@ class TextEditor {
         });
         
         conn.on('error', (err) => {
+            this.debug('Ошибка соединения:', err);
             console.error('Ошибка соединения:', err);
         });
     }
@@ -420,29 +462,42 @@ class TextEditor {
     
     // Отправить обновление текста всем подключенным устройствам
     sendTextUpdate(text) {
-        const textToSend = text || this.editor.value || this.getStoredText();
-        this.connections.forEach(conn => {
+        const textToSend = text || this.editor.value || this.getStoredText() || '';
+        
+        if (textToSend === undefined) {
+            this.debug('Попытка отправить undefined текст');
+            return;
+        }
+        
+        this.debug('Отправка текста', this.connections.length, 'подключениям:', textToSend.length, 'символов');
+        
+        this.connections.forEach((conn, index) => {
             if (conn.open) {
-                conn.send({
-                    type: 'text-update',
-                    text: textToSend,
-                    timestamp: Date.now()
-                });
+                try {
+                    conn.send({
+                        type: 'text-update',
+                        text: textToSend,
+                        timestamp: Date.now()
+                    });
+                    this.debug(`Текст отправлен подключению ${index + 1}`);
+                } catch (e) {
+                    this.debug('Ошибка отправки текста:', e);
+                    console.error('Ошибка отправки текста:', e);
+                }
+            } else {
+                this.debug(`Подключение ${index + 1} не открыто`);
             }
         });
     }
     
     // Синхронизировать текст с другими устройствами через WebRTC
     syncTextToPeers(text) {
-        // Не синхронизировать, если обновление пришло от синхронизации
         if (this.isUpdatingFromSync) {
             return;
         }
         
-        // Сохранить в localStorage перед синхронизацией
         this.saveToStorage();
         
-        // Отправить только через PeerJS соединения (синхронизация между устройствами)
         if (this.connections.length > 0) {
             this.sendTextUpdate(text);
             this.updateSyncStatus('syncing', 'Синхронизация...');
@@ -450,24 +505,58 @@ class TextEditor {
                 this.updateSyncStatus('synced', 'Синхронизировано');
             }, 500);
         } else if (this.isHost) {
-            // Хост еще не подключен, но готов принимать подключения
             this.updateSyncStatus('syncing', 'Ожидание подключений...');
         } else {
-            // Клиент еще не подключен
             this.updateSyncStatus('syncing', 'Подключение...');
         }
+    }
+    
+    // Периодическая синхронизация
+    startPeriodicSync() {
+        // Синхронизировать каждые 5 секунд если есть соединения
+        this.syncTimer = setInterval(() => {
+            if (this.connections.length > 0 && !this.isUpdatingFromSync) {
+                const currentText = this.editor.value;
+                if (currentText !== this.lastSyncedText) {
+                    this.debug('Периодическая синхронизация');
+                    this.syncTextToPeers(currentText);
+                    this.lastSyncedText = currentText;
+                }
+                
+                // Клиент периодически запрашивает текст у хоста
+                if (!this.isHost) {
+                    this.connections.forEach(conn => {
+                        if (conn.open) {
+                            try {
+                                conn.send({ type: 'request-text' });
+                            } catch (e) {
+                                this.debug('Ошибка запроса текста:', e);
+                            }
+                        }
+                    });
+                }
+            }
+        }, 5000);
     }
     
     // Переподключиться к хосту
     reconnect() {
         if (!this.roomId || this.isHost) return;
         
+        this.debug('Попытка переподключения');
+        
         try {
             if (this.peer && !this.peer.destroyed) {
-                const conn = this.peer.connect(this.roomId);
+                const conn = this.peer.connect(this.roomId, {
+                    reliable: true
+                });
                 this.setupConnection(conn);
+            } else {
+                // Пересоздать Peer если он уничтожен
+                this.initPeerJS();
             }
         } catch (e) {
+            this.debug('Ошибка переподключения:', e);
             console.error('Ошибка переподключения:', e);
         }
     }
@@ -476,6 +565,7 @@ class TextEditor {
     updateSyncStatus(status, text) {
         this.syncIndicator.className = `sync-indicator ${status}`;
         this.syncText.textContent = text;
+        this.debug('Статус обновлен:', status, text);
     }
 }
 
@@ -483,4 +573,3 @@ class TextEditor {
 document.addEventListener('DOMContentLoaded', () => {
     new TextEditor();
 });
-
