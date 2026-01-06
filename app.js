@@ -24,8 +24,14 @@ class TextEditor {
         // Проверить наличие roomId в URL
         this.loadRoomFromURL();
         
-        // Загрузить сохраненный текст из localStorage
-        this.loadFromStorage();
+        // Если это клиент (есть roomId в URL), загрузить из localStorage только для быстрого отображения
+        // Актуальный текст будет запрошен у хоста через WebRTC
+        if (this.roomId && !this.isHost) {
+            this.loadFromStorage();
+        } else if (this.isHost) {
+            // Если это хост, загрузить из localStorage
+            this.loadFromStorage();
+        }
         
         // Слушать изменения в редакторе
         this.editor.addEventListener('input', () => {
@@ -170,7 +176,7 @@ class TextEditor {
         }
     }
     
-    // Загрузить текст из localStorage
+    // Загрузить текст из localStorage (только для быстрого отображения)
     loadFromStorage() {
         if (!this.roomId) return;
         
@@ -180,8 +186,11 @@ class TextEditor {
             if (saved) {
                 const data = JSON.parse(saved);
                 if (data.text !== undefined && data.text !== null) {
-                    this.editor.value = data.text;
-                    this.updateCounters();
+                    // Загрузить только если редактор пустой (не перезаписывать если уже есть текст)
+                    if (!this.editor.value || this.editor.value.trim() === '') {
+                        this.editor.value = data.text;
+                        this.updateCounters();
+                    }
                 }
             }
         } catch (e) {
@@ -236,9 +245,18 @@ class TextEditor {
                 });
                 
                 this.peer.on('open', () => {
-                    this.updateSyncStatus('syncing', 'Подключение...');
+                    this.updateSyncStatus('syncing', 'Подключение к хосту...');
                     const conn = this.peer.connect(this.roomId);
                     this.setupConnection(conn);
+                    
+                    // Если соединение не установилось за 3 секунды, попробовать еще раз
+                    setTimeout(() => {
+                        if (this.connections.length === 0) {
+                            this.updateSyncStatus('syncing', 'Повторное подключение...');
+                            const retryConn = this.peer.connect(this.roomId);
+                            this.setupConnection(retryConn);
+                        }
+                    }, 3000);
                 });
             } else {
                 // Хост: создаем новую комнату
@@ -268,11 +286,7 @@ class TextEditor {
                     // Слушать входящие подключения
                     this.peer.on('connection', (conn) => {
                         this.setupConnection(conn);
-                        // Отправить текущий текст новому подключению (из localStorage или редактора)
-                        setTimeout(() => {
-                            const currentText = this.editor.value || this.getStoredText();
-                            this.sendTextUpdate(currentText);
-                        }, 500);
+                        // Хост автоматически отправит текст через setupConnection
                     });
                 });
             }
@@ -305,39 +319,45 @@ class TextEditor {
             this.connections.push(conn);
             this.updateSyncStatus('synced', 'Синхронизировано');
             
-            // Если мы клиент, запросить текущий текст у хоста
+            // Если мы клиент, ОБЯЗАТЕЛЬНО запросить актуальный текст у хоста
             if (!this.isHost) {
-                // Сначала попробовать загрузить из localStorage
-                this.loadFromStorage();
-                // Затем запросить актуальный текст у хоста
+                // Запросить актуальный текст у хоста (не полагаться на localStorage)
                 setTimeout(() => {
                     conn.send({ type: 'request-text' });
-                }, 200);
+                    this.updateSyncStatus('syncing', 'Загрузка текста...');
+                }, 100);
             } else {
-                // Если мы хост, отправить текущий текст сразу
+                // Если мы хост, отправить актуальный текст сразу всем подключенным клиентам
                 setTimeout(() => {
                     const currentText = this.editor.value || this.getStoredText();
-                    this.sendTextUpdate(currentText);
-                }, 300);
+                    if (currentText) {
+                        this.sendTextUpdate(currentText);
+                    }
+                }, 200);
             }
         });
         
         conn.on('data', (data) => {
             if (data.type === 'text-update') {
                 this.isUpdatingFromSync = true;
-                if (data.text !== this.editor.value) {
-                    this.editor.value = data.text;
+                // Всегда обновлять текст, даже если он совпадает (на случай обновления страницы)
+                const receivedText = data.text || '';
+                if (receivedText !== this.editor.value) {
+                    this.editor.value = receivedText;
                     this.updateCounters();
-                    // Сохранить полученный текст в localStorage
-                    this.saveToStorage();
                 }
+                // Сохранить полученный текст в localStorage (глобальная синхронизация)
+                this.saveToStorage();
+                this.updateSyncStatus('synced', 'Синхронизировано');
                 setTimeout(() => {
                     this.isUpdatingFromSync = false;
                 }, 100);
             } else if (data.type === 'request-text') {
-                // Отправить текущий текст по запросу (из localStorage или редактора)
+                // Хост отправляет актуальный текст по запросу клиента
                 const currentText = this.editor.value || this.getStoredText();
-                this.sendTextUpdate(currentText);
+                if (currentText) {
+                    this.sendTextUpdate(currentText);
+                }
             }
         });
         
