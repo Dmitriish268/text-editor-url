@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Текстовый редактор - Текст в URL</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📝 Текстовый редактор</h1>
+            <div class="controls">
+                <button id="shareBtn" class="btn btn-primary">📋 Копировать ссылку</button>
+                <button id="clearBtn" class="btn btn-secondary">🗑️ Очистить</button>
+                <div class="status" id="status"></div>
+            </div>
+        </header>
+        
+        <div class="editor-wrapper">
+            <textarea 
+                id="editor" 
+                placeholder="Начните печатать... Весь текст сохраняется в URL автоматически!"
+                autofocus
+            ></textarea>
+        </div>
+        
+        <footer>
+            <div class="info">
+                <span id="charCount">0 символов</span>
+                <span id="wordCount">0 слов</span>
+            </div>
+            <div class="sync-status" id="syncStatus">
+                <span class="sync-indicator" id="syncIndicator">●</span>
+                <span id="syncText">Синхронизация...</span>
+            </div>
+        </footer>
+    </div>
+    
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
+
