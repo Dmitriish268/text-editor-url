@@ -24,6 +24,9 @@ class TextEditor {
         // Проверить наличие roomId в URL
         this.loadRoomFromURL();
         
+        // Загрузить сохраненный текст из localStorage
+        this.loadFromStorage();
+        
         // Слушать изменения в редакторе
         this.editor.addEventListener('input', () => {
             this.onTextChange();
@@ -37,6 +40,11 @@ class TextEditor {
         // Кнопка очистки
         this.clearBtn.addEventListener('click', () => {
             this.clearText();
+        });
+        
+        // Сохранять текст перед закрытием страницы
+        window.addEventListener('beforeunload', () => {
+            this.saveToStorage();
         });
         
         // Инициализировать синхронизацию
@@ -79,6 +87,9 @@ class TextEditor {
         
         // Обновить счетчики
         this.updateCounters();
+        
+        // Сохранить в localStorage
+        this.saveToStorage();
         
         // Синхронизировать только через WebRTC (не через URL)
         clearTimeout(this.debounceTimer);
@@ -137,7 +148,44 @@ class TextEditor {
         if (confirm('Вы уверены, что хотите очистить весь текст?')) {
             this.editor.value = '';
             this.updateCounters();
+            this.saveToStorage();
             this.syncTextToPeers('');
+        }
+    }
+    
+    // Сохранить текст в localStorage
+    saveToStorage() {
+        if (!this.roomId) return;
+        
+        try {
+            const storageKey = `text-editor-${this.roomId}`;
+            const data = {
+                text: this.editor.value,
+                timestamp: Date.now(),
+                isHost: this.isHost
+            };
+            localStorage.setItem(storageKey, JSON.stringify(data));
+        } catch (e) {
+            console.error('Ошибка сохранения в localStorage:', e);
+        }
+    }
+    
+    // Загрузить текст из localStorage
+    loadFromStorage() {
+        if (!this.roomId) return;
+        
+        try {
+            const storageKey = `text-editor-${this.roomId}`;
+            const saved = localStorage.getItem(storageKey);
+            if (saved) {
+                const data = JSON.parse(saved);
+                if (data.text !== undefined && data.text !== null) {
+                    this.editor.value = data.text;
+                    this.updateCounters();
+                }
+            }
+        } catch (e) {
+            console.error('Ошибка загрузки из localStorage:', e);
         }
     }
     
@@ -220,9 +268,10 @@ class TextEditor {
                     // Слушать входящие подключения
                     this.peer.on('connection', (conn) => {
                         this.setupConnection(conn);
-                        // Отправить текущий текст новому подключению
+                        // Отправить текущий текст новому подключению (из localStorage или редактора)
                         setTimeout(() => {
-                            this.sendTextUpdate(this.editor.value);
+                            const currentText = this.editor.value || this.getStoredText();
+                            this.sendTextUpdate(currentText);
                         }, 500);
                     });
                 });
@@ -256,9 +305,20 @@ class TextEditor {
             this.connections.push(conn);
             this.updateSyncStatus('synced', 'Синхронизировано');
             
-            // Если мы клиент, запросить текущий текст
+            // Если мы клиент, запросить текущий текст у хоста
             if (!this.isHost) {
-                conn.send({ type: 'request-text' });
+                // Сначала попробовать загрузить из localStorage
+                this.loadFromStorage();
+                // Затем запросить актуальный текст у хоста
+                setTimeout(() => {
+                    conn.send({ type: 'request-text' });
+                }, 200);
+            } else {
+                // Если мы хост, отправить текущий текст сразу
+                setTimeout(() => {
+                    const currentText = this.editor.value || this.getStoredText();
+                    this.sendTextUpdate(currentText);
+                }, 300);
             }
         });
         
@@ -268,14 +328,16 @@ class TextEditor {
                 if (data.text !== this.editor.value) {
                     this.editor.value = data.text;
                     this.updateCounters();
-                    // URL не меняется - синхронизация только через WebRTC
+                    // Сохранить полученный текст в localStorage
+                    this.saveToStorage();
                 }
                 setTimeout(() => {
                     this.isUpdatingFromSync = false;
                 }, 100);
             } else if (data.type === 'request-text') {
-                // Отправить текущий текст по запросу
-                this.sendTextUpdate(this.editor.value);
+                // Отправить текущий текст по запросу (из localStorage или редактора)
+                const currentText = this.editor.value || this.getStoredText();
+                this.sendTextUpdate(currentText);
             }
         });
         
@@ -291,13 +353,31 @@ class TextEditor {
         });
     }
     
+    // Получить сохраненный текст из localStorage
+    getStoredText() {
+        if (!this.roomId) return '';
+        
+        try {
+            const storageKey = `text-editor-${this.roomId}`;
+            const saved = localStorage.getItem(storageKey);
+            if (saved) {
+                const data = JSON.parse(saved);
+                return data.text || '';
+            }
+        } catch (e) {
+            console.error('Ошибка чтения из localStorage:', e);
+        }
+        return '';
+    }
+    
     // Отправить обновление текста всем подключенным устройствам
     sendTextUpdate(text) {
+        const textToSend = text || this.editor.value || this.getStoredText();
         this.connections.forEach(conn => {
             if (conn.open) {
                 conn.send({
                     type: 'text-update',
-                    text: text,
+                    text: textToSend,
                     timestamp: Date.now()
                 });
             }
@@ -310,6 +390,9 @@ class TextEditor {
         if (this.isUpdatingFromSync) {
             return;
         }
+        
+        // Сохранить в localStorage перед синхронизацией
+        this.saveToStorage();
         
         // Отправить только через PeerJS соединения (синхронизация между устройствами)
         if (this.connections.length > 0) {
