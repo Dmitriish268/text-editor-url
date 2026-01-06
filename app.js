@@ -345,6 +345,12 @@ class TextEditor {
             this.connections = this.connections.filter(c => c !== conn);
             if (this.connections.length === 0) {
                 this.updateSyncStatus('syncing', 'Переподключение...');
+                // При потере соединения попробовать переподключиться
+                if (!this.isHost && this.roomId) {
+                    setTimeout(() => {
+                        this.reconnect();
+                    }, 2000);
+                }
             }
         });
         
@@ -407,6 +413,20 @@ class TextEditor {
         } else {
             // Клиент еще не подключен
             this.updateSyncStatus('syncing', 'Подключение...');
+        }
+    }
+    
+    // Переподключиться к хосту
+    reconnect() {
+        if (!this.roomId || this.isHost) return;
+        
+        try {
+            if (this.peer && !this.peer.destroyed) {
+                const conn = this.peer.connect(this.roomId);
+                this.setupConnection(conn);
+            }
+        } catch (e) {
+            console.error('Ошибка переподключения:', e);
         }
     }
     
