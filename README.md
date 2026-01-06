@@ -39,7 +39,9 @@ php -S localhost:8000
 
 ### Онлайн версия
 
-Откройте [GitHub Pages](https://YOUR_USERNAME.github.io/text-editor-url/) (после настройки деплоя)
+🌐 **Живая версия**: [https://dmitriish268.github.io/text-editor-url/](https://dmitriish268.github.io/text-editor-url/)
+
+📦 **Репозиторий**: [https://github.com/Dmitriish268/text-editor-url](https://github.com/Dmitriish268/text-editor-url)
 
 ## 📖 Как использовать
 
