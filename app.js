@@ -74,10 +74,25 @@ class TextEditor {
     loadRoomFromURL() {
         const params = new URLSearchParams(window.location.search);
         const roomId = params.get('room');
+        const textParam = params.get('text');
         
         if (roomId) {
             this.roomId = roomId;
             this.debug('Загружен roomId из URL:', roomId);
+            
+            // Загрузить текст из URL если есть
+            if (textParam) {
+                try {
+                    const decodedText = atob(textParam);
+                    if (decodedText && decodedText !== this.editor.value) {
+                        this.editor.value = decodedText;
+                        this.updateCounters();
+                        this.debug('Загружен текст из URL:', decodedText.length, 'символов');
+                    }
+                } catch (e) {
+                    this.debug('Ошибка декодирования текста из URL');
+                }
+            }
             
             // Проверить статус хоста из localStorage
             try {
@@ -100,13 +115,26 @@ class TextEditor {
         }
     }
     
-    // Обновить URL только с roomId (ссылка не меняется)
-    updateURL() {
+    // Обновить URL с roomId и текстом
+    updateURL(includeText = false) {
         if (!this.roomId) return;
         
         const url = new URL(window.location.href);
         url.search = '';
         url.searchParams.set('room', this.roomId);
+        
+        // Добавить текст в URL если нужно или если WebRTC не работает
+        if (includeText || this.connections.length === 0) {
+            const text = this.editor.value;
+            if (text && text.length < 1000) { // Ограничение длины URL
+                try {
+                    const encodedText = btoa(text);
+                    url.searchParams.set('text', encodedText);
+                } catch (e) {
+                    this.debug('Ошибка кодирования текста в base64');
+                }
+            }
+        }
         
         if (window.location.search !== url.search) {
             window.history.replaceState({}, '', url);
@@ -123,6 +151,9 @@ class TextEditor {
         
         // Сохранить в localStorage
         this.saveToStorage();
+        
+        // Обновить URL с текстом (резервная синхронизация)
+        this.updateURL(true);
         
         // Синхронизировать через WebRTC
         clearTimeout(this.debounceTimer);
@@ -146,11 +177,13 @@ class TextEditor {
     
     // Копировать ссылку в буфер обмена
     async copyLink() {
+        // Обновить URL с текущим текстом
+        this.updateURL(true);
         const url = window.location.href;
         
         try {
             await navigator.clipboard.writeText(url);
-            this.showStatus('✅ Ссылка скопирована!');
+            this.showStatus('✅ Ссылка скопирована! Откройте на другом устройстве');
         } catch (e) {
             const textArea = document.createElement('textarea');
             textArea.value = url;
@@ -158,7 +191,7 @@ class TextEditor {
             textArea.select();
             try {
                 document.execCommand('copy');
-                this.showStatus('✅ Ссылка скопирована!');
+                this.showStatus('✅ Ссылка скопирована! Откройте на другом устройстве');
             } catch (err) {
                 this.showStatus('❌ Ошибка копирования');
             }
@@ -262,14 +295,15 @@ class TextEditor {
                 this.debug('Инициализация как КЛИЕНТ, roomId:', roomParam);
                 
                 this.peer = new Peer({
-                    host: 'peerjs-server.herokuapp.com',
+                    host: '0.peerjs.com',
                     port: 443,
                     path: '/',
                     secure: true,
                     config: {
                         iceServers: [
                             { urls: 'stun:stun.l.google.com:19302' },
-                            { urls: 'stun:stun1.l.google.com:19302' }
+                            { urls: 'stun:stun1.l.google.com:19302' },
+                            { urls: 'stun:stun2.l.google.com:19302' }
                         ]
                     }
                 });
@@ -308,14 +342,15 @@ class TextEditor {
                 this.debug('Инициализация как ХОСТ, roomId:', this.roomId);
                 
                 this.peer = new Peer(this.roomId, {
-                    host: 'peerjs-server.herokuapp.com',
+                    host: '0.peerjs.com',
                     port: 443,
                     path: '/',
                     secure: true,
                     config: {
                         iceServers: [
                             { urls: 'stun:stun.l.google.com:19302' },
-                            { urls: 'stun:stun1.l.google.com:19302' }
+                            { urls: 'stun:stun1.l.google.com:19302' },
+                            { urls: 'stun:stun2.l.google.com:19302' }
                         ]
                     }
                 });
@@ -505,9 +540,9 @@ class TextEditor {
                 this.updateSyncStatus('synced', 'Синхронизировано');
             }, 500);
         } else if (this.isHost) {
-            this.updateSyncStatus('syncing', 'Ожидание подключений...');
+            this.updateSyncStatus('syncing', 'Синхронизация через URL (ожидание WebRTC)');
         } else {
-            this.updateSyncStatus('syncing', 'Подключение...');
+            this.updateSyncStatus('syncing', 'Синхронизация через URL (подключение...)');
         }
     }
     
@@ -535,8 +570,36 @@ class TextEditor {
                         }
                     });
                 }
+            } else {
+                // Если WebRTC не работает, проверяем URL на изменения
+                this.checkURLForChanges();
             }
         }, 5000);
+    }
+    
+    // Проверить URL на изменения текста
+    checkURLForChanges() {
+        const params = new URLSearchParams(window.location.search);
+        const textParam = params.get('text');
+        
+        if (textParam) {
+            try {
+                const decodedText = atob(textParam);
+                if (decodedText && decodedText !== this.editor.value && decodedText !== this.lastSyncedText) {
+                    this.isUpdatingFromSync = true;
+                    this.editor.value = decodedText;
+                    this.lastSyncedText = decodedText;
+                    this.updateCounters();
+                    this.debug('Обновлен текст из URL:', decodedText.length, 'символов');
+                    
+                    setTimeout(() => {
+                        this.isUpdatingFromSync = false;
+                    }, 100);
+                }
+            } catch (e) {
+                this.debug('Ошибка декодирования текста из URL при проверке');
+            }
+        }
     }
     
     // Переподключиться к хосту
@@ -564,8 +627,15 @@ class TextEditor {
     // Обновить статус синхронизации
     updateSyncStatus(status, text) {
         this.syncIndicator.className = `sync-indicator ${status}`;
-        this.syncText.textContent = text;
-        this.debug('Статус обновлен:', status, text);
+        
+        // Добавить информацию о типе синхронизации
+        let statusText = text;
+        if (this.connections.length === 0 && this.roomId) {
+            statusText += ' • URL-синхронизация активна';
+        }
+        
+        this.syncText.textContent = statusText;
+        this.debug('Статус обновлен:', status, statusText);
     }
 }
 
