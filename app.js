@@ -2,6 +2,7 @@ class TextEditor {
     constructor() {
         this.editor = document.getElementById('editor');
         this.shareBtn = document.getElementById('shareBtn');
+        this.refreshBtn = document.getElementById('refreshBtn');
         this.clearBtn = document.getElementById('clearBtn');
         this.status = document.getElementById('status');
         this.charCount = document.getElementById('charCount');
@@ -58,6 +59,11 @@ class TextEditor {
         // Кнопка копирования ссылки
         this.shareBtn.addEventListener('click', () => {
             this.copyLink();
+        });
+        
+        // Кнопка обновления
+        this.refreshBtn.addEventListener('click', () => {
+            this.manualRefresh();
         });
         
         // Кнопка очистки
@@ -149,6 +155,36 @@ class TextEditor {
         
         this.charCount.textContent = `${chars.toLocaleString()} символов`;
         this.wordCount.textContent = `${words.toLocaleString()} слов`;
+    }
+    
+    // Принудительное обновление
+    async manualRefresh() {
+        this.updateSyncStatus('syncing', '🔄 Принудительное обновление...');
+        this.refreshBtn.disabled = true;
+        this.refreshBtn.textContent = '⏳ Обновление...';
+        
+        try {
+            // Попытаться загрузить с сервера
+            const updated = await this.loadFromServer();
+            
+            if (updated) {
+                this.showStatus('✅ Обновлено с сервера!');
+            } else {
+                this.showStatus('ℹ️ Уже актуальная версия');
+            }
+            
+        } catch (error) {
+            this.showStatus('❌ Ошибка обновления');
+            this.debug('Ошибка принудительного обновления:', error);
+        } finally {
+            // Вернуть кнопку в нормальное состояние
+            this.refreshBtn.disabled = false;
+            this.refreshBtn.textContent = '🔄 Обновить';
+            
+            setTimeout(() => {
+                this.updateSyncStatus('synced', '✅ Готово к синхронизации');
+            }, 1000);
+        }
     }
     
     // Копировать ссылку в буфер обмена
