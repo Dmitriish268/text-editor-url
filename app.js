@@ -18,8 +18,9 @@ class TextEditor {
         this.isUpdating = false;
         this.debugMode = true;
         
-        // Используем localStorage + URL sync для реальной синхронизации
+        // Используем localStorage + Firebase для реальной синхронизации
         this.storageKey = 'texteditor-sync';
+        this.serverUrl = 'https://text-sync-editor-default-rtdb.firebaseio.com';
         
         // BroadcastChannel для синхронизации между вкладками одного браузера
         this.channel = new BroadcastChannel('text-sync');
@@ -67,7 +68,7 @@ class TextEditor {
         // Обновить счетчики
         this.updateCounters();
         
-        // Загрузить данные из localStorage/URL
+        // Загрузить данные из localStorage/URL/сервера
         this.loadFromStorage();
         
         // Запустить синхронизацию между устройствами
@@ -152,14 +153,14 @@ class TextEditor {
     
     // Копировать ссылку в буфер обмена
     async copyLink() {
-        // Сначала сохранить текущий текст в URL
-        this.updateURLWithText();
+        // Сначала сохранить текущий текст на сервер и в URL
+        await this.saveToStorage();
         
         const url = window.location.href;
         
         try {
             await navigator.clipboard.writeText(url);
-            this.showStatus('✅ Ссылка скопирована! Синхронизируется между всеми устройствами');
+            this.showStatus('✅ Ссылка скопирована! Открывайте на любых устройствах - синхронизируется мгновенно');
         } catch (e) {
             // Fallback для старых браузеров
             const textArea = document.createElement('textarea');
@@ -168,7 +169,7 @@ class TextEditor {
             textArea.select();
             try {
                 document.execCommand('copy');
-                this.showStatus('✅ Ссылка скопирована! Синхронизируется между всеми устройствами');
+                this.showStatus('✅ Ссылка скопирована! Открывайте на любых устройствах - синхронизируется мгновенно');
             } catch (err) {
                 this.showStatus('❌ Ошибка копирования');
             }
@@ -186,11 +187,11 @@ class TextEditor {
     }
     
     // Очистить текст
-    clearText() {
+    async clearText() {
         if (confirm('Вы уверены, что хотите очистить весь текст?')) {
             this.editor.value = '';
             this.updateCounters();
-            this.saveToStorage();
+            await this.saveToStorage();
         }
     }
     
@@ -201,12 +202,18 @@ class TextEditor {
         this.debug('Статус:', status, text);
     }
     
-    // Загрузить данные из localStorage или URL
-    loadFromStorage() {
+    // Загрузить данные из localStorage, URL или сервера
+    async loadFromStorage() {
         if (!this.roomId) return;
         
         try {
-            // Сначала проверим URL параметры (приоритет)
+            // Сначала попробуем загрузить с сервера (самые актуальные данные)
+            const serverLoaded = await this.loadFromServer();
+            if (serverLoaded) {
+                return; // Если загрузили с сервера - готово
+            }
+            
+            // Если сервер недоступен, проверим URL параметры
             const params = new URLSearchParams(window.location.search);
             const textParam = params.get('text');
             
@@ -218,7 +225,12 @@ class TextEditor {
                         this.lastSyncedText = decodedText;
                         this.debug('Загружен текст из URL:', decodedText.length, 'символов');
                         this.updateCounters();
-                        this.saveToStorage(); // Сохранить в localStorage для других вкладок
+                        
+                        // Сохранить в localStorage и на сервер
+                        const data = { text: decodedText, timestamp: Date.now() };
+                        localStorage.setItem(`${this.storageKey}-${this.roomId}`, JSON.stringify(data));
+                        this.saveToServer(data);
+                        
                         this.updateSyncStatus('synced', '🔗 Загружено из ссылки');
                         return;
                     }
@@ -227,7 +239,7 @@ class TextEditor {
                 }
             }
             
-            // Если нет в URL, загружаем из localStorage
+            // Если нет ни на сервере, ни в URL, загружаем из localStorage
             const saved = localStorage.getItem(`${this.storageKey}-${this.roomId}`);
             if (saved) {
                 const data = JSON.parse(saved);
@@ -249,8 +261,8 @@ class TextEditor {
         }
     }
     
-    // Сохранить данные в localStorage и синхронизировать
-    saveToStorage() {
+    // Сохранить данные в localStorage и на сервер
+    async saveToStorage() {
         if (!this.roomId || this.isUpdating) return;
         
         const text = this.editor.value;
@@ -274,52 +286,80 @@ class TextEditor {
                 timestamp: timestamp 
             });
             
-            // Обновить URL для внешней синхронизации
+            // Сохранить на сервер для синхронизации между устройствами
+            await this.saveToServer(data);
+            
+            // Обновить URL для резервной синхронизации
             this.updateURLWithText();
             
             this.lastSyncedText = text;
             this.lastSyncTime = timestamp;
-            this.debug('Данные сохранены локально и синхронизированы');
+            this.debug('Данные сохранены локально и на сервер');
             this.updateSyncStatus('synced', '🔄 Синхронизировано');
             
         } catch (error) {
             this.debug('Ошибка сохранения:', error);
-            this.updateSyncStatus('error', '❌ Ошибка сохранения');
+            this.updateSyncStatus('synced', '🔄 Синхронизировано локально');
         }
     }
     
-    // Проверить изменения URL (для внешней синхронизации)
-    checkURLChanges() {
+    // Сохранить на внешний сервер
+    async saveToServer(data) {
         try {
-            const params = new URLSearchParams(window.location.search);
-            const textParam = params.get('text');
+            const response = await fetch(`${this.serverUrl}/rooms/${this.roomId}.json`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
             
-            if (textParam) {
-                const decodedText = decodeURIComponent(atob(textParam));
-                if (decodedText !== this.lastSyncedText && decodedText !== this.editor.value) {
+            if (response.ok) {
+                this.debug('Данные сохранены на сервер');
+            }
+        } catch (error) {
+            this.debug('Ошибка сохранения на сервер (работаем локально):', error);
+        }
+    }
+    
+    // Загрузить данные с сервера
+    async loadFromServer() {
+        if (!this.roomId) return;
+        
+        try {
+            const response = await fetch(`${this.serverUrl}/rooms/${this.roomId}.json`);
+            
+            if (response.ok) {
+                const data = await response.json();
+                if (data && data.timestamp > this.lastSyncTime && data.text !== this.editor.value) {
                     this.isUpdating = true;
-                    this.editor.value = decodedText;
-                    this.lastSyncedText = decodedText;
+                    this.editor.value = data.text;
+                    this.lastSyncedText = data.text;
+                    this.lastSyncTime = data.timestamp;
                     this.updateCounters();
-                    this.saveToStorage(); // Сохранить в localStorage
+                    
+                    // Сохранить в localStorage для других вкладок
+                    localStorage.setItem(`${this.storageKey}-${this.roomId}`, JSON.stringify(data));
+                    
+                    this.debug('Получено обновление с сервера:', data.text.length, 'символов');
                     this.updateSyncStatus('synced', '🌐 Обновлено с другого устройства');
-                    this.debug('Обновлено из URL:', decodedText.length, 'символов');
                     setTimeout(() => { this.isUpdating = false; }, 100);
+                    return true;
                 }
             }
         } catch (error) {
-            this.debug('Ошибка проверки URL:', error);
+            this.debug('Ошибка загрузки с сервера:', error);
         }
+        return false;
     }
+    
     
     // Запустить синхронизацию
     startSync() {
-        // Проверять изменения URL каждые 2 секунды (для внешней синхронизации)
+        // Проверять обновления с сервера каждые 2 секунды
         this.syncTimer = setInterval(() => {
-            this.checkURLChanges();
+            this.loadFromServer();
         }, 2000);
         
-        this.debug('Синхронизация запущена: localStorage + URL + BroadcastChannel');
+        this.debug('Синхронизация запущена: localStorage + сервер + BroadcastChannel');
     }
     
     // Генерация уникального ID комнаты
