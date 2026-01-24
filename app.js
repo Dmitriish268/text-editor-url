@@ -11,9 +11,15 @@ class TextEditor {
         this.syncText = document.getElementById('syncText');
         
         this.debounceTimer = null;
+        this.syncTimer = null;
         this.roomId = null;
         this.lastSyncedText = '';
+        this.lastSyncTime = 0;
+        this.isUpdating = false;
         this.debugMode = true;
+        
+        // API для синхронизации (используем публичную Firebase)
+        this.apiUrl = 'https://text-editor-demo-default-rtdb.firebaseio.com';
         
         this.init();
     }
@@ -27,8 +33,8 @@ class TextEditor {
     init() {
         this.debug('Инициализация редактора');
         
-        // Загрузить данные из URL
-        this.loadFromURL();
+        // Получить roomId из URL или создать новый
+        this.initRoom();
         
         // Слушать изменения в редакторе
         this.editor.addEventListener('input', () => {
@@ -48,41 +54,29 @@ class TextEditor {
         // Обновить счетчики
         this.updateCounters();
         
-        // Обновить статус
-        this.updateSyncStatus('synced', 'Готов к работе');
+        // Загрузить данные с сервера
+        this.loadFromServer();
+        
+        // Запустить синхронизацию
+        this.startSync();
     }
     
-    // Загрузить данные из URL
-    loadFromURL() {
+    // Инициализация комнаты
+    initRoom() {
         const params = new URLSearchParams(window.location.search);
         const roomId = params.get('room');
-        const textParam = params.get('text');
         
-        // Загрузить текст из URL если есть
-        if (textParam) {
-            try {
-                const decodedText = decodeURIComponent(atob(textParam));
-                if (decodedText) {
-                    this.editor.value = decodedText;
-                    this.lastSyncedText = decodedText;
-                    this.debug('Загружен текст из URL:', decodedText.length, 'символов');
-                }
-            } catch (e) {
-                this.debug('Ошибка декодирования текста из URL');
-            }
-        }
-        
-        // Установить или создать roomId
         if (roomId) {
             this.roomId = roomId;
             this.debug('Использован roomId из URL:', roomId);
         } else {
             this.roomId = this.generateRoomId();
+            this.updateURL();
             this.debug('Создан новый roomId:', this.roomId);
         }
     }
     
-    // Обновить URL с текстом
+    // Обновить URL с roomId
     updateURL() {
         if (!this.roomId) return;
         
@@ -90,31 +84,22 @@ class TextEditor {
         url.search = '';
         url.searchParams.set('room', this.roomId);
         
-        const text = this.editor.value;
-        if (text && text.length < 2000) { // Ограичение длины URL
-            try {
-                const encodedText = btoa(encodeURIComponent(text));
-                url.searchParams.set('text', encodedText);
-            } catch (e) {
-                this.debug('Ошибка кодирования текста');
-            }
-        }
-        
         window.history.replaceState({}, '', url);
         this.debug('URL обновлен');
     }
     
     // Обработчик изменения текста
     onTextChange() {
+        if (this.isUpdating) return; // Не обрабатываем изменения во время синхронизации
+        
         // Обновить счетчики
         this.updateCounters();
         
-        // Обновить URL с небольшой задержкой
+        // Сохранить на сервер с задержкой
         clearTimeout(this.debounceTimer);
         this.debounceTimer = setTimeout(() => {
-            this.updateURL();
-            this.updateSyncStatus('synced', 'Сохранено в ссылке');
-        }, 500);
+            this.saveToServer();
+        }, 1000);
     }
     
     // Обновить счетчики символов и слов
@@ -129,14 +114,14 @@ class TextEditor {
     
     // Копировать ссылку в буфер обмена
     async copyLink() {
-        // Сначала обновить URL с текущим текстом
-        this.updateURL();
+        // Сначала сохранить текущий текст на сервер
+        await this.saveToServer();
         
         const url = window.location.href;
         
         try {
             await navigator.clipboard.writeText(url);
-            this.showStatus('✅ Ссылка скопирована!');
+            this.showStatus('✅ Ссылка скопирована! Открывайте на любых устройствах');
         } catch (e) {
             // Fallback для старых браузеров
             const textArea = document.createElement('textarea');
@@ -145,7 +130,7 @@ class TextEditor {
             textArea.select();
             try {
                 document.execCommand('copy');
-                this.showStatus('✅ Ссылка скопирована!');
+                this.showStatus('✅ Ссылка скопирована! Открывайте на любых устройствах');
             } catch (err) {
                 this.showStatus('❌ Ошибка копирования');
             }
@@ -167,7 +152,7 @@ class TextEditor {
         if (confirm('Вы уверены, что хотите очистить весь текст?')) {
             this.editor.value = '';
             this.updateCounters();
-            this.updateURL();
+            this.saveToServer();
         }
     }
     
@@ -176,6 +161,105 @@ class TextEditor {
         this.syncIndicator.className = `sync-indicator ${status}`;
         this.syncText.textContent = text;
         this.debug('Статус:', status, text);
+    }
+    
+    // Загрузить данные с сервера
+    async loadFromServer() {
+        if (!this.roomId) return;
+        
+        try {
+            this.updateSyncStatus('syncing', 'Загрузка...');
+            
+            const response = await fetch(`${this.apiUrl}/rooms/${this.roomId}.json`);
+            
+            if (response.ok) {
+                const data = await response.json();
+                if (data && data.text !== undefined) {
+                    this.isUpdating = true;
+                    this.editor.value = data.text || '';
+                    this.lastSyncedText = data.text || '';
+                    this.lastSyncTime = data.timestamp || 0;
+                    this.updateCounters();
+                    this.debug('Загружены данные с сервера:', (data.text || '').length, 'символов');
+                    setTimeout(() => { this.isUpdating = false; }, 100);
+                }
+            }
+            
+            this.updateSyncStatus('synced', 'Готово к синхронизации');
+        } catch (error) {
+            this.debug('Ошибка загрузки с сервера:', error);
+            this.updateSyncStatus('synced', 'Локальный режим');
+        }
+    }
+    
+    // Сохранить данные на сервер
+    async saveToServer() {
+        if (!this.roomId || this.isUpdating) return;
+        
+        const text = this.editor.value;
+        const timestamp = Date.now();
+        
+        // Не сохранять если текст не изменился
+        if (text === this.lastSyncedText) return;
+        
+        try {
+            this.updateSyncStatus('syncing', 'Сохранение...');
+            
+            const data = { text, timestamp };
+            
+            const response = await fetch(`${this.apiUrl}/rooms/${this.roomId}.json`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+            
+            if (response.ok) {
+                this.lastSyncedText = text;
+                this.lastSyncTime = timestamp;
+                this.debug('Данные сохранены на сервер');
+                this.updateSyncStatus('synced', 'Сохранено');
+            } else {
+                throw new Error('Ошибка сохранения');
+            }
+        } catch (error) {
+            this.debug('Ошибка сохранения:', error);
+            this.updateSyncStatus('error', 'Ошибка сохранения');
+        }
+    }
+    
+    // Проверить обновления с сервера
+    async checkServerUpdates() {
+        if (!this.roomId || this.isUpdating) return;
+        
+        try {
+            const response = await fetch(`${this.apiUrl}/rooms/${this.roomId}.json`);
+            
+            if (response.ok) {
+                const data = await response.json();
+                if (data && data.timestamp > this.lastSyncTime && data.text !== this.editor.value) {
+                    this.isUpdating = true;
+                    this.editor.value = data.text;
+                    this.lastSyncedText = data.text;
+                    this.lastSyncTime = data.timestamp;
+                    this.updateCounters();
+                    this.debug('Получено обновление с сервера:', data.text.length, 'символов');
+                    this.updateSyncStatus('synced', 'Обновлено');
+                    setTimeout(() => { this.isUpdating = false; }, 100);
+                }
+            }
+        } catch (error) {
+            // Не показываем ошибки при проверке обновлений
+        }
+    }
+    
+    // Запустить синхронизацию
+    startSync() {
+        // Проверять обновления каждые 2 секунды
+        this.syncTimer = setInterval(() => {
+            this.checkServerUpdates();
+        }, 2000);
+        
+        this.debug('Синхронизация запущена');
     }
     
     // Генерация уникального ID комнаты
