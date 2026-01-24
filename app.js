@@ -18,9 +18,9 @@ class TextEditor {
         this.isUpdating = false;
         this.debugMode = true;
         
-        // Используем localStorage + Firebase для реальной синхронизации
+        // Используем localStorage + kvdb.io (простой и надежный key-value store)
         this.storageKey = 'texteditor-sync';
-        this.serverUrl = 'https://text-sync-editor-default-rtdb.firebaseio.com';
+        this.serverUrl = 'https://kvdb.io/GHzaKBYVMdWVQRMFYM9Pyc';
         
         // BroadcastChannel для синхронизации между вкладками одного браузера
         this.channel = new BroadcastChannel('text-sync');
@@ -138,7 +138,7 @@ class TextEditor {
         clearTimeout(this.debounceTimer);
         this.debounceTimer = setTimeout(() => {
             this.saveToStorage();
-        }, 300);
+        }, 100); // Ускорено для быстрой синхронизации
     }
     
     // Обновить счетчики символов и слов
@@ -306,14 +306,14 @@ class TextEditor {
     // Сохранить на внешний сервер
     async saveToServer(data) {
         try {
-            const response = await fetch(`${this.serverUrl}/rooms/${this.roomId}.json`, {
-                method: 'PUT',
+            const response = await fetch(`${this.serverUrl}/${this.roomId}`, {
+                method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data)
             });
             
             if (response.ok) {
-                this.debug('Данные сохранены на сервер');
+                this.debug('Данные сохранены на сервер kvdb.io');
             }
         } catch (error) {
             this.debug('Ошибка сохранения на сервер (работаем локально):', error);
@@ -325,24 +325,27 @@ class TextEditor {
         if (!this.roomId) return;
         
         try {
-            const response = await fetch(`${this.serverUrl}/rooms/${this.roomId}.json`);
+            const response = await fetch(`${this.serverUrl}/${this.roomId}`);
             
             if (response.ok) {
-                const data = await response.json();
-                if (data && data.timestamp > this.lastSyncTime && data.text !== this.editor.value) {
-                    this.isUpdating = true;
-                    this.editor.value = data.text;
-                    this.lastSyncedText = data.text;
-                    this.lastSyncTime = data.timestamp;
-                    this.updateCounters();
-                    
-                    // Сохранить в localStorage для других вкладок
-                    localStorage.setItem(`${this.storageKey}-${this.roomId}`, JSON.stringify(data));
-                    
-                    this.debug('Получено обновление с сервера:', data.text.length, 'символов');
-                    this.updateSyncStatus('synced', '🌐 Обновлено с другого устройства');
-                    setTimeout(() => { this.isUpdating = false; }, 100);
-                    return true;
+                const text = await response.text();
+                if (text && text !== 'Not found.' && text !== '') {
+                    const data = JSON.parse(text);
+                    if (data && data.timestamp > this.lastSyncTime && data.text !== this.editor.value) {
+                        this.isUpdating = true;
+                        this.editor.value = data.text;
+                        this.lastSyncedText = data.text;
+                        this.lastSyncTime = data.timestamp;
+                        this.updateCounters();
+                        
+                        // Сохранить в localStorage для других вкладок
+                        localStorage.setItem(`${this.storageKey}-${this.roomId}`, JSON.stringify(data));
+                        
+                        this.debug('Получено обновление с сервера kvdb.io:', data.text.length, 'символов');
+                        this.updateSyncStatus('synced', '🌐 Обновлено с другого устройства');
+                        setTimeout(() => { this.isUpdating = false; }, 100);
+                        return true;
+                    }
                 }
             }
         } catch (error) {
@@ -354,12 +357,12 @@ class TextEditor {
     
     // Запустить синхронизацию
     startSync() {
-        // Проверять обновления с сервера каждые 2 секунды
+        // Проверять обновления с сервера каждую секунду для быстрой синхронизации
         this.syncTimer = setInterval(() => {
             this.loadFromServer();
-        }, 2000);
+        }, 1000);
         
-        this.debug('Синхронизация запущена: localStorage + сервер + BroadcastChannel');
+        this.debug('Быстрая синхронизация запущена: localStorage + kvdb.io + BroadcastChannel (1 сек)');
     }
     
     // Генерация уникального ID комнаты
